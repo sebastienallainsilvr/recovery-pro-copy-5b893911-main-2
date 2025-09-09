@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -27,15 +26,18 @@ import {
   CheckCircle,
   XCircle,
   Search,
-  ChevronDown // Added ChevronDown icon import
+  ChevronDown
 } from "lucide-react";
 import { format, differenceInDays, addDays } from "date-fns";
 import { fr } from "date-fns/locale";
+import { toast } from "sonner";
 
 import KanbanCard from "../components/kanban/KanbanCard";
 import StatusChangeModal from "../components/kanban/StatusChangeModal";
 import UploadDocumentModal from "../components/kanban/UploadDocumentModal";
 import ActionModal from "../components/kanban/ActionModal";
+import { useDataLoader } from "../components/hooks/useDataLoader";
+import { dataService } from "../components/services/dataService";
 
 const ALL_STATUTS = [
   "PENDING ASSIGNATION",
@@ -58,20 +60,17 @@ const ALL_STATUTS = [
 const STATUTS_FINAUX = ["FULLY RECOVERED", "WRITTEN OFF / CANCELLED", "COLLECTIVE PROCEDURE"];
 
 export default function Kanban() {
+  // État local des dossiers (au lieu de multiples états séparés)
   const [dossiers, setDossiers] = useState([]);
-  const [entreprises, setEntreprises] = useState([]);
-  const [transactions, setTransactions] = useState([]);
-  const [actions, setActions] = useState([]);
-  const [loading, setLoading] = useState(true);
 
   // Filtres
-  const [isFiltersOpen, setIsFiltersOpen] = useState(false); // New state for filters
+  const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [filterAgent, setFilterAgent] = useState("all");
   const [filterPays, setFilterPays] = useState("all");
   const [filterMontantEleve, setFilterMontantEleve] = useState(false);
   const [filterActionsRetard, setFilterActionsRetard] = useState(false);
   const [showStatutsFinaux, setShowStatutsFinaux] = useState(false);
-  const [searchTerm, setSearchTerm] = useState(""); // Nouveau state pour la recherche
+  const [searchTerm, setSearchTerm] = useState("");
 
   // Modals
   const [showStatusModal, setShowStatusModal] = useState(false);
@@ -81,84 +80,32 @@ export default function Kanban() {
   const [targetStatut, setTargetStatut] = useState("");
   const [preselectedActionType, setPreselectedActionType] = useState(null);
 
-  // Refs pour la nouvelle barre de défilement
+  // Refs pour la barre de défilement
   const kanbanContainerRef = useRef(null);
   const customScrollThumbRef = useRef(null);
 
   const agents = ["Maya", "Andrea", "Dylon", "Sébastien"];
 
-  useEffect(() => {
-    loadData();
+  // Chargement des données avec le hook useDataLoader
+  const loadAllData = useCallback(async () => {
+    const [dossiersData, entreprisesData, transactionsData, actionsData] = await Promise.all([
+      DossierRecouvrement.list(),
+      EntrepriseDebiteur.list(),
+      Transaction.list(),
+      Action.list()
+    ]);
+
+    return dataService.enrichDossiers(dossiersData, entreprisesData, transactionsData, actionsData);
   }, []);
 
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const [dossiersData, entreprisesData, transactionsData, actionsData] = await Promise.all([
-        DossierRecouvrement.list(),
-        EntrepriseDebiteur.list(),
-        Transaction.list(),
-        Action.list()
-      ]);
+  const { data: allDossiers, loading, refetch } = useDataLoader(loadAllData);
 
-      // Enrichir les dossiers avec les calculs
-      const enrichedDossiers = dossiersData.map(dossier => {
-        const entreprise = entreprisesData.find(e => e.id === dossier.entreprise_id);
+  useEffect(() => {
+    setDossiers(allDossiers);
+  }, [allDossiers]);
 
-        // Calculer montant_total_paye (SANS exclure les annulés pour le remaining amount)
-        const transactionsValides = transactionsData.filter(t =>
-          t.dossier_id === dossier.id &&
-          ["Paiement", "Virement reçu"].includes(t.type_transaction) &&
-          t.pris_en_compte_calcul === true
-          // Retirer la condition && t.statut !== "Annulé" pour inclure les annulés
-        );
-        const montantTotalPaye = transactionsValides.reduce((sum, t) => sum + (t.montant || 0), 0);
-
-        // Calculer montant_restant_du (incluant les annulés)
-        const montantRestant = (dossier.montant_initial || 0) - montantTotalPaye;
-
-        // Calculer jours depuis dernière action
-        const actionsEntreprise = actionsData.filter(a => a.entreprise_id === dossier.entreprise_id);
-        const derniereAction = actionsEntreprise.length > 0 ?
-          actionsEntreprise.reduce((latest, action) =>
-            new Date(action.date_action) > new Date(latest.date_action) ? action : latest
-          ) : null;
-
-        const joursDepuisDerniereAction = derniereAction ?
-          differenceInDays(new Date(), new Date(derniereAction.date_action)) : null;
-
-        // Calculer date limite action
-        let dateLimiteAction = null;
-        if (dossier.date_entree_statut && ["R1", "R2", "R3", "R4"].includes(dossier.statut_recouvrement)) {
-          const jours = dossier.statut_recouvrement === "R4" ? 3 : 5;
-          dateLimiteAction = addDays(new Date(dossier.date_entree_statut), jours);
-        }
-
-        const enRetard = dateLimiteAction ? new Date() > dateLimiteAction : false;
-
-        return {
-          ...dossier,
-          entreprise,
-          montant_total_paye: montantTotalPaye,
-          montant_restant_du: montantRestant,
-          jours_depuis_derniere_action: joursDepuisDerniereAction,
-          date_limite_action: dateLimiteAction,
-          en_retard: enRetard
-        };
-      });
-
-      setDossiers(enrichedDossiers);
-      setEntreprises(entreprisesData);
-      setTransactions(transactionsData);
-      setActions(actionsData);
-    } catch (error) {
-      console.error("Erreur lors du chargement:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleKanbanScroll = () => {
+  // Gestionnaire de défilement
+  const handleKanbanScroll = useCallback(() => {
     const container = kanbanContainerRef.current;
     const thumb = customScrollThumbRef.current;
     if (!container || !thumb) return;
@@ -173,25 +120,20 @@ export default function Kanban() {
 
     const thumbWidthPercentage = (container.clientWidth / container.scrollWidth) * 100;
     const scrollPercentage = container.scrollLeft / scrollableWidth;
-
     const thumbLeftPosition = scrollPercentage * (100 - thumbWidthPercentage);
 
     thumb.style.width = `${thumbWidthPercentage}%`;
     thumb.style.left = `${thumbLeftPosition}%`;
-  };
+  }, []);
 
   useEffect(() => {
-    // Appeler handleKanbanScroll au chargement pour définir la taille initiale
     const container = kanbanContainerRef.current;
     if (container) {
-      // Un petit délai pour s'assurer que le rendu est terminé
       setTimeout(handleKanbanScroll, 100);
     }
-    // Ajouter un écouteur pour le redimensionnement de la fenêtre
     window.addEventListener('resize', handleKanbanScroll);
     return () => window.removeEventListener('resize', handleKanbanScroll);
-  }, [dossiers]); // Ré-exécuter si les dossiers changent
-
+  }, [dossiers, handleKanbanScroll]);
 
   const handleTrackClick = (e) => {
     const container = kanbanContainerRef.current;
@@ -201,12 +143,12 @@ export default function Kanban() {
     const rect = track.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const trackWidth = rect.width;
-
     const scrollPercentage = clickX / trackWidth;
 
     container.scrollLeft = scrollPercentage * (container.scrollWidth - container.clientWidth);
   };
 
+  // Logique de filtrage
   const filteredDossiers = dossiers.filter(dossier => {
     if (!dossier.entreprise) return false;
 
@@ -215,7 +157,6 @@ export default function Kanban() {
     if (filterMontantEleve && (dossier.montant_restant_du || 0) <= 10000) return false;
     if (filterActionsRetard && !dossier.en_retard) return false;
 
-    // Nouveau filtre de recherche
     if (searchTerm) {
       const searchLower = searchTerm.toLowerCase();
       const matchNom = dossier.entreprise.nom_entreprise?.toLowerCase().includes(searchLower);
@@ -233,11 +174,47 @@ export default function Kanban() {
     ALL_STATUTS :
     ALL_STATUTS.filter(s => !STATUTS_FINAUX.includes(s));
 
-  // Calculate the count of dossiers that will actually be displayed after all filters
   const finalDisplayableDossiers = filteredDossiers.filter(dossier =>
     statutsAffiches.includes(dossier.statut_recouvrement)
   );
 
+  // Mise à jour optimiste du dossier
+  const updateDossierOptimistic = useCallback((dossierId, updates) => {
+    setDossiers(prevDossiers => {
+      return prevDossiers.map(dossier => {
+        if (dossier.id === dossierId) {
+          const updatedDossier = { ...dossier, ...updates };
+          
+          // Recalculer les propriétés dérivées si nécessaire
+          if (updates.statut_recouvrement && ["R1", "R2", "R3", "R4"].includes(updates.statut_recouvrement)) {
+            const jours = updates.statut_recouvrement === "R4" ? 3 : 5;
+            updatedDossier.date_limite_action = addDays(new Date(updates.date_entree_statut), jours);
+            updatedDossier.en_retard = new Date() > updatedDossier.date_limite_action;
+          } else if (updates.statut_recouvrement) {
+            updatedDossier.date_limite_action = null;
+            updatedDossier.en_retard = false;
+          }
+          
+          return updatedDossier;
+        }
+        return dossier;
+      });
+    });
+  }, []);
+
+  // Rollback optimiste en cas d'erreur
+  const rollbackDossierOptimistic = useCallback((dossierId, originalDossier) => {
+    setDossiers(prevDossiers => {
+      return prevDossiers.map(dossier => {
+        if (dossier.id === dossierId) {
+          return originalDossier;
+        }
+        return dossier;
+      });
+    });
+  }, []);
+
+  // Gestionnaire de drag & drop optimisé
   const onDragEnd = async (result) => {
     if (!result.destination) return;
 
@@ -247,7 +224,10 @@ export default function Kanban() {
 
     if (!dossier || dossier.statut_recouvrement === newStatut) return;
 
-    // Règles spéciales
+    // Sauvegarder l'état original pour le rollback
+    const originalDossier = { ...dossier };
+
+    // Règles spéciales qui nécessitent un modal
     if (newStatut === "COLLECTIVE PROCEDURE") {
       setSelectedDossier(dossier);
       setTargetStatut(newStatut);
@@ -262,11 +242,35 @@ export default function Kanban() {
       return;
     }
 
-    // Changement de statut standard
-    await updateDossierStatut(dossier, newStatut);
+    // Mise à jour optimiste immédiate
+    const optimisticUpdates = {
+      statut_recouvrement: newStatut,
+      date_entree_statut: new Date().toISOString(),
+      date_derniere_activite: new Date().toISOString()
+    };
+
+    updateDossierOptimistic(dossierId, optimisticUpdates);
+    
+    // Toast de feedback immédiat
+    toast.loading("Mise à jour en cours...", { id: `update-${dossierId}` });
+
+    try {
+      // Mise à jour en base de données en arrière-plan
+      await updateDossierStatut(dossier, newStatut, {}, false); // false = pas de rechargement
+      
+      // Confirmer le succès
+      toast.success("Statut mis à jour avec succès", { id: `update-${dossierId}` });
+    } catch (error) {
+      console.error("Erreur lors de la mise à jour:", error);
+      
+      // Rollback en cas d'erreur
+      rollbackDossierOptimistic(dossierId, originalDossier);
+      toast.error("Erreur lors de la mise à jour", { id: `update-${dossierId}` });
+    }
   };
 
-  const updateDossierStatut = async (dossier, newStatut, additionalData = {}) => {
+  // Fonction de mise à jour du statut modifiée pour supporter l'optimisation
+  const updateDossierStatut = async (dossier, newStatut, additionalData = {}, shouldRefetch = true) => {
     try {
       // Mettre à jour le dossier
       await DossierRecouvrement.update(dossier.id, {
@@ -297,32 +301,38 @@ export default function Kanban() {
         resultat: "Autre"
       });
 
-      loadData(); // Recharger les données
+      // Recharger seulement si explicitement demandé (pour les modals)
+      if (shouldRefetch) {
+        refetch();
+      }
     } catch (error) {
       console.error("Erreur lors de la mise à jour:", error);
+      throw error; // Re-throw pour permettre le rollback
     }
   };
 
   const handleStatusChange = async (data) => {
-    await updateDossierStatut(selectedDossier, targetStatut, data);
-    setShowStatusModal(false);
-    setSelectedDossier(null);
-    setTargetStatut("");
+    try {
+      await updateDossierStatut(selectedDossier, targetStatut, data, true); // true = refetch pour les modals
+      setShowStatusModal(false);
+      setSelectedDossier(null);
+      setTargetStatut("");
+    } catch (error) {
+      toast.error("Erreur lors de la mise à jour du statut");
+    }
   };
 
   const handleDocumentUpload = async (documentData) => {
     try {
-      // Créer le document
       await DocumentCreance.create(documentData);
-
-      // Mettre à jour le statut
-      await updateDossierStatut(selectedDossier, targetStatut);
+      await updateDossierStatut(selectedDossier, targetStatut, {}, true); // true = refetch pour les modals
 
       setShowUploadModal(false);
       setSelectedDossier(null);
       setTargetStatut("");
     } catch (error) {
       console.error("Erreur lors de l'upload:", error);
+      toast.error("Erreur lors de l'upload du document");
     }
   };
 
@@ -336,46 +346,41 @@ export default function Kanban() {
     if (!selectedDossier) return;
 
     try {
-      // 1. Create Action
       await Action.create({
         entreprise_id: selectedDossier.entreprise_id,
         dossier_id: selectedDossier.id,
         type_action: actionData.type_action,
         date_action: new Date().toISOString(),
-        agent_responsable: "Agent", // TODO: Remplacer par l'agent connecté
+        agent_responsable: "Agent",
         description: actionData.description,
         resultat: actionData.resultat,
         montant_promis: actionData.montant_promis,
         date_promise: actionData.date_promise,
       });
 
-      // 2. Update Dossier's last activity date
       await DossierRecouvrement.update(selectedDossier.id, {
         date_derniere_activite: new Date().toISOString(),
       });
 
-      // 3. Handle status change for "Promise to Pay"
       if (actionData.resultat === 'Promesse de paiement') {
-        // This will reload data internally
         await updateDossierStatut(selectedDossier, 'PROMISE TO PAY', {
           montant_promis: actionData.montant_promis,
           date_promesse: actionData.date_promise,
           commentaire_promesse: actionData.description,
-        });
+        }, true); // true = refetch car changement de statut
       } else {
-        // 4. Reload data for other cases
-        loadData();
+        // Pour les autres actions, juste refetch pour mettre à jour les données
+        refetch();
       }
     } catch (error) {
       console.error("Erreur lors de l'enregistrement de l'action:", error);
+      toast.error("Erreur lors de l'enregistrement de l'action");
     } finally {
-      // 5. Close modal
       setShowActionModal(false);
       setSelectedDossier(null);
       setPreselectedActionType(null);
     }
   };
-
 
   if (loading) {
     return (
@@ -523,7 +528,6 @@ export default function Kanban() {
               <span className="text-sm font-medium text-slate-700">Navigation Kanban</span>
               <span className="text-xs text-slate-500">Cliquez pour naviguer ⟵ ⟶</span>
             </div>
-            {/* Track de la scrollbar */}
             <div
               className="relative h-3 bg-slate-100 rounded-full cursor-pointer"
               onClick={handleTrackClick}
@@ -536,7 +540,7 @@ export default function Kanban() {
             </div>
           </div>
 
-          {/* Le Kanban avec une classe spéciale */}
+          {/* Le Kanban */}
           <div
             ref={kanbanContainerRef}
             className="kanban-container w-full overflow-x-auto"
@@ -552,10 +556,9 @@ export default function Kanban() {
                   const dossiersStatut = filteredDossiers
                     .filter(d => d.statut_recouvrement === statut)
                     .sort((a, b) => {
-                      // Tri par date_derniere_activite croissante (plus ancienne en haut)
                       if (!a.date_derniere_activite && !b.date_derniere_activite) return 0;
-                      if (!a.date_derniere_activite) return -1; // place dossiers without a date_derniere_activite at the start
-                      if (!b.date_derniere_activite) return 1; // place dossiers with a date_derniere_activite after those without one
+                      if (!a.date_derniere_activite) return -1;
+                      if (!b.date_derniere_activite) return 1;
                       return new Date(a.date_derniere_activite).getTime() - new Date(b.date_derniere_activite).getTime();
                     });
                   
@@ -608,14 +611,13 @@ export default function Kanban() {
                         </Droppable>
                         
                         <div className="p-3 border-t border-slate-200 bg-slate-50 flex-shrink-0">
-                            <div className="flex items-center justify-between">
-                                <h3 className="font-semibold text-slate-700 text-xs uppercase">Total</h3>
-                                <Badge variant="secondary" className="font-semibold">
-                                    {new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(totalMontantStatut)}
-                                </Badge>
-                            </div>
+                          <div className="flex items-center justify-between">
+                            <h3 className="font-semibold text-slate-700 text-xs uppercase">Total</h3>
+                            <Badge variant="secondary" className="font-semibold">
+                              {new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(totalMontantStatut)}
+                            </Badge>
+                          </div>
                         </div>
-
                       </Card>
                     </div>
                   );

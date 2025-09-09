@@ -1,8 +1,13 @@
+
 import { differenceInDays, parseISO, addDays } from 'date-fns';
+import { rulesService } from './rulesService';
 
 export const dataService = {
   // Enrichissement des dossiers avec les calculs
-  enrichDossiers: (dossiers, entreprises, transactions, actions) => {
+  enrichDossiers: async (dossiers, entreprises, transactions, actions) => {
+    // Charger les règles métier une seule fois
+    const rules = await rulesService.loadRules();
+    
     return dossiers.map(dossier => {
       const entreprise = entreprises.find(e => e.id === dossier.entreprise_id);
       
@@ -32,14 +37,18 @@ export const dataService = {
       const joursDepuisDerniereAction = derniereAction ? 
         differenceInDays(new Date(), parseISO(derniereAction.date_action)) : null;
 
-      // Calculer date limite action
+      // Calculer date limite action selon les règles métier configurables
       let dateLimiteAction = null;
-      if (dossier.date_entree_statut && ["R1", "R2", "R3", "R4"].includes(dossier.statut_recouvrement)) {
-        const jours = dossier.statut_recouvrement === "R4" ? 3 : 5;
-        dateLimiteAction = addDays(new Date(dossier.date_entree_statut), jours);
+      let enRetard = false;
+      
+      if (dossier.date_entree_statut && dossier.statut_recouvrement) {
+        const delaiRule = rules[`DELAI_${dossier.statut_recouvrement}`];
+        if (delaiRule) {
+          const jours = delaiRule.numericValue;
+          dateLimiteAction = addDays(new Date(dossier.date_entree_statut), jours);
+          enRetard = new Date() > dateLimiteAction;
+        }
       }
-
-      const enRetard = dateLimiteAction ? new Date() > dateLimiteAction : false;
 
       return {
         ...dossier,
