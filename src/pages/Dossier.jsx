@@ -1,16 +1,29 @@
 
 import React, { useState, useEffect, useCallback } from "react";
-import { DossierRecouvrement, EntrepriseDebiteur, Transaction, Action, Contact } from "@/api/entities";
+import { DossierRecouvrement, EntrepriseDebiteur, Transaction, Action, Contact, HistoriqueStatut, DocumentCreance, User as UserEntity } from "@/api/entities";
+import { UploadFile } from "@/api/integrations";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Building2, Euro, Calendar, User, Phone, Mail, Clock, Users, Plus, ExternalLink } from "lucide-react";
+import { ArrowLeft, Building2, Euro, Calendar, User, Phone, Mail, Clock, Users, Plus, ExternalLink, FileText } from "lucide-react";
 import { Link } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 import { format } from "date-fns";
 import { fr } from "date-fns/locale";
+import { toast } from "sonner";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
 
 import ActionModal from "../components/kanban/ActionModal";
+import AttachmentUploadModal from "../components/dossier-detail/AttachmentUploadModal";
+
+const ALL_STATUTS = [
+  "PENDING ASSIGNATION", "R1", "R2", "R3", "R4", "R5", "PROMISE TO PAY",
+  "UNDER NEGOTIATION", "CONCILIATION - PENDING ASSIGNATION", "CONCILIATION - ONGOING MEETINGS",
+  "LAWYER / CONCILIATION", "REPAYMENT PLAN TO SCHEDULE", "REPAYMENT PLAN ONGOING",
+  "DISPUTE / LITIGATION", "PENDING TO BE OUTSOURCED", "OUTSOURCED TO AGENCY",
+  "COLLECTIVE PROCEDURE", "FULLY RECOVERED", "WRITTEN OFF / CANCELLED"
+];
 
 export default function Dossier() {
   // Utiliser les paramètres d'URL au lieu de useParams
@@ -22,22 +35,30 @@ export default function Dossier() {
   const [transactions, setTransactions] = useState([]);
   const [actions, setActions] = useState([]);
   const [contacts, setContacts] = useState([]);
+  const [documents, setDocuments] = useState([]); // New state for documents
   const [loading, setLoading] = useState(true);
 
   // State pour le modal d'action
   const [showActionModal, setShowActionModal] = useState(false);
+  const [showAttachmentModal, setShowAttachmentModal] = useState(false); // New state for attachment modal
+
+  // DEBUG: Suivre les changements de l'état showActionModal
+  useEffect(() => {
+    console.log(`DossierPage (DEBUG): useEffect a détecté un changement. Nouvelle valeur de showActionModal: ${showActionModal}`);
+  }, [showActionModal]);
 
   const loadDossierDetail = useCallback(async () => {
     setLoading(true);
     
     try {
       // Charger toutes les données
-      const [dossiersData, entreprisesData, transactionsData, actionsData, contactsData] = await Promise.all([
+      const [dossiersData, entreprisesData, transactionsData, actionsData, contactsData, documentsData] = await Promise.all([
         DossierRecouvrement.list(),
         EntrepriseDebiteur.list(),
         Transaction.list(),
         Action.list(),
-        Contact.list()
+        Contact.list(),
+        DocumentCreance.list() // Fetch documents
       ]);
 
       const currentDossier = dossiersData.find(d => d.id === id);
@@ -45,6 +66,7 @@ export default function Dossier() {
       const dossierTransactions = transactionsData.filter(t => t.dossier_id === id);
       const dossierActions = actionsData.filter(a => a.dossier_id === id);
       const dossierContacts = entrepriseData ? contactsData.filter(c => c.entreprise_id === entrepriseData.id) : [];
+      const dossierDocuments = documentsData.filter(doc => doc.dossier_id === id); // Filter documents for the current dossier
 
       if (currentDossier && entrepriseData) {
         // Calculer montants
@@ -65,6 +87,7 @@ export default function Dossier() {
         setTransactions(dossierTransactions.sort((a, b) => new Date(b.date_transaction) - new Date(a.date_transaction)));
         setActions(dossierActions.sort((a, b) => new Date(b.date_action) - new Date(a.date_action)));
         setContacts(dossierContacts);
+        setDocuments(dossierDocuments.sort((a, b) => new Date(b.date_upload) - new Date(a.date_upload))); // Set documents state
       }
     } catch (error) {
       console.error("Erreur lors du chargement:", error);
@@ -79,24 +102,160 @@ export default function Dossier() {
     }
   }, [id, loadDossierDetail]);
 
-  const handleSaveAction = async (actionData) => {
-    if (!dossier) return;
+  const updateDossierStatut = useCallback(async (dossierId, oldStatut, newStatut, additionalDossierUpdates = {}) => {
+    const toastId = toast.loading("Mise à jour du statut...");
     try {
+      console.log("Dossier: Récupération de l'utilisateur pour le changement de statut...");
+      const user = await UserEntity.me(); // Fetch current user
+      console.log("Dossier: Utilisateur récupéré:", user);
+      
+      let responsibleAgent;
+      if (user && user.full_name) {
+        console.log("Dossier: Nom complet trouvé:", user.full_name);
+        responsibleAgent = user.full_name;
+      } else {
+        console.log("Dossier: Pas de nom complet, utilisation de l'email:", user?.email);
+        responsibleAgent = user?.email || "Agent Inconnu";
+      }
+      
+      console.log("Dossier: Agent responsable final:", responsibleAgent);
+
+      await DossierRecouvrement.update(dossierId, {
+        statut_recouvrement: newStatut,
+        date_entree_statut: new Date().toISOString(),
+        date_derniere_activite: new Date().toISOString(),
+        ...additionalDossierUpdates, // For promise details like montant_promis, date_promesse
+      });
+
+      await HistoriqueStatut.create({
+        dossier_id: dossierId,
+        ancien_statut: oldStatut,
+        nouveau_statut: newStatut,
+        date_changement: new Date().toISOString(),
+        change_par: responsibleAgent, 
+        motif: `Changement depuis la page dossier${additionalDossierUpdates.commentaire_promesse ? ` (Promesse: ${additionalDossierUpdates.commentaire_promesse})` : ''}`
+      });
+      
+      // Create an action for the status change
+      console.log("Dossier: Création d'une action avec agent_responsable:", responsibleAgent);
+      await Action.create({
+        entreprise_id: entreprise.id, // Assuming entreprise is available in scope
+        dossier_id: dossierId,
+        type_action: "Changement de statut",
+        date_action: new Date().toISOString(),
+        agent_responsable: responsibleAgent, // Use current user's name
+        description: `Statut changé de "${oldStatut}" vers "${newStatut}"`,
+        resultat: "Autre"
+      });
+      
+      toast.success("Statut mis à jour avec succès !", { id: toastId });
+      loadDossierDetail(); // Recharger les données pour refléter le changement
+    } catch (error) {
+      console.error("Erreur lors de la mise à jour du statut:", error);
+      toast.error("Erreur lors de la mise à jour du statut.", { id: toastId });
+      throw error; // Propagate error for try/catch in calling function if needed
+    }
+  }, [loadDossierDetail, entreprise]);
+
+  const handleSaveAction = async (actionData) => {
+    if (!dossier || !entreprise) return; // Ensure dossier and entreprise are loaded
+    try {
+      console.log("Dossier: Sauvegarde d'action avec agent_responsable:", actionData.agent_responsable);
+      
       await Action.create({
         entreprise_id: dossier.entreprise_id,
         dossier_id: dossier.id,
-        ...actionData,
+        type_action: actionData.type_action,
+        date_action: new Date().toISOString(), 
+        agent_responsable: actionData.agent_responsable, // Use agent name from ActionModal
+        description: actionData.description,
+        resultat: actionData.resultat,
+        montant_promis: actionData.montant_promis,
+        date_promise: actionData.date_promise,
       });
+
       await DossierRecouvrement.update(dossier.id, {
         date_derniere_activite: new Date().toISOString(),
       });
-      loadDossierDetail(); // Recharger les données pour voir la nouvelle action
+
+      if (actionData.resultat === 'Promesse de paiement') {
+        await updateDossierStatut(dossier.id, dossier.statut_recouvrement, 'PROMISE TO PAY', {
+          montant_promis: actionData.montant_promis,
+          date_promesse: actionData.date_promise,
+          commentaire_promesse: actionData.description, // Use action description as promise comment
+        });
+      } else {
+        // Pour les autres actions, juste refetch pour mettre à jour les données
+        loadDossierDetail(); // Recharger les données pour voir la nouvelle action
+      }
     } catch (error) {
       console.error("Erreur lors de l'enregistrement de l'action:", error);
+      toast.error("Erreur lors de l'enregistrement de l'action.");
     } finally {
       setShowActionModal(false);
     }
   };
+
+  const handleAttachmentUpload = async ({ file, link, fileName, type_document, notes, upload_par }) => {
+    if (!dossier) return;
+    const toastId = toast.loading("Upload du fichier en cours...");
+
+    try {
+      let fileUrl;
+      let finalFileName;
+
+      if (file) {
+        const { file_url } = await UploadFile({ file: file });
+        fileUrl = file_url;
+        finalFileName = file.name;
+      } else {
+        fileUrl = link;
+        finalFileName = fileName;
+      }
+      
+      console.log("Dossier: Création de document avec upload_par:", upload_par);
+      
+      await DocumentCreance.create({
+        dossier_id: dossier.id,
+        type_document: type_document,
+        nom_fichier: finalFileName,
+        date_upload: new Date().toISOString(),
+        upload_par: upload_par, // Use user name from AttachmentUploadModal
+        fichier: fileUrl,
+        notes: notes
+      });
+
+      console.log("Dossier: Création d'action d'ajout de document avec agent_responsable:", upload_par);
+      
+      await Action.create({
+        entreprise_id: dossier.entreprise_id,
+        dossier_id: dossier.id,
+        type_action: "Document ajouté",
+        date_action: new Date().toISOString(),
+        agent_responsable: upload_par, // Use user name from AttachmentUploadModal
+        description: `Document ajouté: ${finalFileName} (${type_document})`,
+        resultat: "Autre"
+      });
+
+      toast.success("Pièce jointe ajoutée avec succès !", { id: toastId });
+      setShowAttachmentModal(false);
+      loadDossierDetail(); // Recharger les données pour voir le nouveau document
+    } catch (error) {
+      console.error("Erreur lors de l'ajout de la pièce jointe:", error);
+      toast.error("Erreur lors de l'upload.", { id: toastId });
+    }
+  };
+
+  const handleStatusChange = async (newStatut) => {
+    if (!dossier || dossier.statut_recouvrement === newStatut) return;
+    
+    try {
+      await updateDossierStatut(dossier.id, dossier.statut_recouvrement, newStatut);
+    } catch (error) {
+      // Error is already handled by updateDossierStatut's toast
+    }
+  };
+
 
   if (loading) {
     return (
@@ -151,19 +310,40 @@ export default function Dossier() {
 
   return (
     <>
+      {/* DEBUG: Log de la valeur de l'état à chaque rendu */}
+      {console.log(`DossierPage (DEBUG): Rendu en cours. Valeur de showActionModal: ${showActionModal}`)}
+
       <div className="p-6 space-y-6 bg-slate-50 min-h-screen">
         <div className="max-w-6xl mx-auto">
           {/* Header */}
-          <div className="flex items-center gap-4 mb-8">
-            <Link to={createPageUrl("Kanban")}>
-              <Button variant="outline" size="sm">
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                Retour au Kanban
-              </Button>
-            </Link>
-            <div>
-              <h1 className="text-3xl font-bold text-slate-900">{entreprise.nom_entreprise}</h1>
-              <p className="text-slate-600">Détail du dossier de recouvrement</p>
+          <div className="flex items-start justify-between gap-4 mb-8">
+            <div className="flex items-center gap-4">
+               <Link to={createPageUrl("Kanban")}>
+                <Button variant="outline" size="sm">
+                  <ArrowLeft className="w-4 h-4 mr-2" />
+                  Retour
+                </Button>
+              </Link>
+              <div>
+                <h1 className="text-3xl font-bold text-slate-900">{entreprise.nom_entreprise}</h1>
+                <p className="text-slate-600">Détail du dossier de recouvrement</p>
+              </div>
+            </div>
+            
+            {/* Sélecteur de statut */}
+            <div className="flex-shrink-0 w-64">
+                <Select value={dossier.statut_recouvrement} onValueChange={handleStatusChange}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Changer le statut..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ALL_STATUTS.map(statut => (
+                      <SelectItem key={statut} value={statut}>
+                        {statut.replace(/_/g, ' ')}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
             </div>
           </div>
 
@@ -239,6 +419,42 @@ export default function Dossier() {
                     </div>
                   ) : (
                     <p className="text-center text-slate-500 py-8">Aucune transaction</p>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Actions récentes */}
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between">
+                  <CardTitle className="flex items-center gap-2">
+                    <Clock className="w-5 h-5" />
+                    Actions Récentes
+                  </CardTitle>
+                  <Button variant="outline" size="sm" onClick={() => {
+                    console.log("DossierPage (DEBUG): Bouton 'Ajouter Action' cliqué. Tentative de mise à jour de showActionModal à true.");
+                    setShowActionModal(true);
+                  }}>
+                    <Plus className="w-4 h-4 mr-2" />
+                    Ajouter
+                  </Button>
+                </CardHeader>
+                <CardContent>
+                  {actions.length > 0 ? (
+                    <div className="space-y-3 max-h-72 overflow-y-auto pr-2">
+                      {actions.map((action) => (
+                        <div key={action.id} className="p-3 bg-slate-50 rounded-lg">
+                          <p className="font-medium text-sm">{action.type_action}</p>
+                          <p className="text-xs text-slate-600">
+                            {format(new Date(action.date_action), 'dd/MM/yyyy HH:mm', { locale: fr })}
+                          </p>
+                          {action.description && (
+                            <p className="text-xs text-slate-500 mt-1">{action.description}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-center text-slate-500 py-4">Aucune action</p>
                   )}
                 </CardContent>
               </Card>
@@ -345,35 +561,39 @@ export default function Dossier() {
                 </CardContent>
               </Card>
 
-              {/* Actions récentes */}
+              {/* Pièces jointes */}
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between">
                   <CardTitle className="flex items-center gap-2">
-                    <Clock className="w-5 h-5" />
-                    Actions Récentes
+                    <FileText className="w-5 h-5" />
+                    Pièces Jointes
                   </CardTitle>
-                  <Button variant="outline" size="sm" onClick={() => setShowActionModal(true)}>
+                  <Button variant="outline" size="sm" onClick={() => setShowAttachmentModal(true)}>
                     <Plus className="w-4 h-4 mr-2" />
                     Ajouter
                   </Button>
                 </CardHeader>
                 <CardContent>
-                  {actions.length > 0 ? (
-                    <div className="space-y-3">
-                      {actions.slice(0, 5).map((action) => (
-                        <div key={action.id} className="p-3 bg-slate-50 rounded-lg">
-                          <p className="font-medium text-sm">{action.type_action}</p>
-                          <p className="text-xs text-slate-600">
-                            {format(new Date(action.date_action), 'dd/MM/yyyy HH:mm', { locale: fr })}
-                          </p>
-                          {action.description && (
-                            <p className="text-xs text-slate-500 mt-1">{action.description}</p>
-                          )}
-                        </div>
+                  {documents.length > 0 ? (
+                    <div className="space-y-3 max-h-72 overflow-y-auto pr-2">
+                      {documents.map((doc) => (
+                        <a 
+                          key={doc.id}
+                          href={doc.fichier}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block p-3 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors"
+                        >
+                          <p className="font-medium text-sm text-blue-600 truncate">{doc.nom_fichier}</p>
+                          <div className="flex justify-between items-center text-xs text-slate-500 mt-1">
+                            <span>{doc.type_document}</span>
+                            <span>{format(new Date(doc.date_upload), 'dd/MM/yy')}</span>
+                          </div>
+                        </a>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-center text-slate-500 py-4">Aucune action</p>
+                    <p className="text-center text-slate-500 py-4">Aucune pièce jointe</p>
                   )}
                 </CardContent>
               </Card>
@@ -381,12 +601,22 @@ export default function Dossier() {
           </div>
         </div>
       </div>
+      
+      {/* Modales */}
       {showActionModal && (
         <ActionModal
           isOpen={showActionModal}
           onClose={() => setShowActionModal(false)}
           dossier={dossier}
           onConfirm={handleSaveAction}
+        />
+      )}
+      {showAttachmentModal && (
+        <AttachmentUploadModal
+          isOpen={showAttachmentModal}
+          onClose={() => setShowAttachmentModal(false)}
+          dossier={dossier}
+          onConfirm={handleAttachmentUpload}
         />
       )}
     </>
