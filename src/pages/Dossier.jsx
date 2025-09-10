@@ -12,6 +12,7 @@ import { format } from "date-fns";
 import { fr } from "date-fns/locale";
 import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { logger } from "@/components/utils/logger";
 
 
 import ActionModal from "../components/kanban/ActionModal";
@@ -44,7 +45,7 @@ export default function Dossier() {
 
   // DEBUG: Suivre les changements de l'état showActionModal
   useEffect(() => {
-    console.log(`DossierPage (DEBUG): useEffect a détecté un changement. Nouvelle valeur de showActionModal: ${showActionModal}`);
+    logger.debug(`DossierPage: useEffect a détecté un changement. Nouvelle valeur de showActionModal: ${showActionModal}`);
   }, [showActionModal]);
 
   const loadDossierDetail = useCallback(async () => {
@@ -311,7 +312,7 @@ export default function Dossier() {
   return (
     <>
       {/* DEBUG: Log de la valeur de l'état à chaque rendu */}
-      {console.log(`DossierPage (DEBUG): Rendu en cours. Valeur de showActionModal: ${showActionModal}`)}
+      {logger.debug(`DossierPage: Rendu en cours. Valeur de showActionModal: ${showActionModal}`)}
 
       <div className="p-6 space-y-6 bg-slate-50 min-h-screen">
         <div className="max-w-6xl mx-auto">
@@ -431,7 +432,7 @@ export default function Dossier() {
                     Actions Récentes
                   </CardTitle>
                   <Button variant="outline" size="sm" onClick={() => {
-                    console.log("DossierPage (DEBUG): Bouton 'Ajouter Action' cliqué. Tentative de mise à jour de showActionModal à true.");
+                    logger.debug("DossierPage: Bouton 'Ajouter Action' cliqué. Tentative de mise à jour de showActionModal à true.");
                     setShowActionModal(true);
                   }}>
                     <Plus className="w-4 h-4 mr-2" />

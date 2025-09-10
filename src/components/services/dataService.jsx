@@ -1,14 +1,16 @@
-
 import { differenceInDays, parseISO, addDays } from 'date-fns';
 import { rulesService } from './rulesService';
+import { logger } from '@/components/utils/logger';
 
 export const dataService = {
   // Enrichissement des dossiers avec les calculs
   enrichDossiers: async (dossiers, entreprises, transactions, actions) => {
+    logger.debug('dataService: Début enrichissement des dossiers', { count: dossiers.length });
+    
     // Charger les règles métier une seule fois
     const rules = await rulesService.loadRules();
     
-    return dossiers.map(dossier => {
+    const enrichedDossiers = dossiers.map(dossier => {
       const entreprise = entreprises.find(e => e.id === dossier.entreprise_id);
       
       // Calculer montant_total_paye
@@ -62,10 +64,14 @@ export const dataService = {
         en_retard: enRetard
       };
     });
+
+    logger.debug('dataService: Enrichissement terminé', { enrichedCount: enrichedDossiers.length });
+    return enrichedDossiers;
   },
 
   // Enrichissement des entreprises avec l'URL Pappers
   enrichEntreprises: (entreprises) => {
+    logger.debug('dataService: Enrichissement des entreprises avec URL Pappers', { count: entreprises.length });
     return entreprises.map(entreprise => ({
       ...entreprise,
       url_pappers: (entreprise.siren && entreprise.pays === 'France') ? 
@@ -101,6 +107,11 @@ export const dataService = {
 
   // Calculer les statistiques du dashboard
   calculateDashboardStats: (dossiers, transactions, selectedPeriod) => {
+    logger.debug('dataService: Calcul des statistiques dashboard', { 
+      dossiers: dossiers.length, 
+      period: selectedPeriod 
+    });
+    
     const { start: periodStart, end: periodEnd } = dataService.getPeriodDates(selectedPeriod);
     
     const dossiersActifs = dossiers.length;
@@ -119,12 +130,15 @@ export const dataService = {
     const montantInitialPeriode = dossiers.reduce((sum, d) => sum + (d.montant_initial || 0), 0);
     const tauxRecuperation = montantInitialPeriode > 0 ? (montantRecouvre / montantInitialPeriode) * 100 : 0;
 
-    return {
+    const stats = {
       dossiersActifs,
       montantTotal,
       montantRecouvre,
       tauxRecuperation
     };
+
+    logger.debug('dataService: Statistiques calculées', stats);
+    return stats;
   },
 
   // Utilitaire pour calculer les dates de période

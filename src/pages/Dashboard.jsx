@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { EntrepriseDebiteur, DossierRecouvrement, Transaction, Action } from "@/api/entities";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -14,7 +13,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { format, differenceInDays, startOfMonth, endOfMonth, subDays, parseISO } from "date-fns";
 import { fr } from "date-fns/locale";
 import { PieChart, Pie, Cell, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import MultiSelect from "@/components/ui/multi-select"; // Importer le nouveau composant
+import MultiSelect from "@/components/ui/multi-select";
+
+// Import des nouvelles utilitaires
+import { logger } from "@/components/utils/logger";
+import { 
+  enrichDossier, 
+  calculateDashboardStats, 
+  calculateChartData,
+  calculatePriorityLists 
+} from "@/components/utils/dashboardCalculations";
 
 const STATUTS_FINAUX = ["FULLY RECOVERED", "WRITTEN OFF / CANCELLED", "COLLECTIVE PROCEDURE"];
 const AGENTS_VALIDES = ["Maya", "Andrea", "Dylon", "Sébastien"];
@@ -23,27 +31,32 @@ const FOURNISSEURS = ["SILVR", "SILVR_REPURCHASED", "SILVR_SLAM_FFS", "SLAM", "D
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82CA9D', '#FFC658', '#FF7C7C'];
 
 export default function Dashboard() {
-  const [entreprises, setEntreprises] = useState([]);
-  const [dossiers, setDossiers] = useState([]);
-  const [transactions, setTransactions] = useState([]);
-  const [actions, setActions] = useState([]);
+  // États pour les données brutes
+  const [rawData, setRawData] = useState({
+    entreprises: [],
+    dossiers: [],
+    transactions: [],
+    actions: []
+  });
   const [loading, setLoading] = useState(true);
 
-  // Filtres
-  const [excludeFinal, setExcludeFinal] = useState(true);
-  const [selectedAgents, setSelectedAgents] = useState([]); // Changé en tableau
-  const [selectedPays, setSelectedPays] = useState("all");
-  const [selectedPeriod, setSelectedPeriod] = useState("current_month");
-  const [selectedFournisseurs, setSelectedFournisseurs] = useState([]); // Changé en tableau
+  // États pour les filtres regroupés
+  const [filters, setFilters] = useState({
+    excludeFinal: true,
+    selectedAgents: [],
+    selectedPays: "all",
+    selectedPeriod: "current_month",
+    selectedFournisseurs: []
+  });
 
   const navigate = useNavigate();
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  // Chargement des données optimisé
+  const loadData = useCallback(async () => {
     try {
+      setLoading(true);
+      logger.debug("Début du chargement des données du dashboard");
+      
       const [entreprisesData, dossiersData, transactionsData, actionsData] = await Promise.all([
         EntrepriseDebiteur.list(),
         DossierRecouvrement.list(),
@@ -51,211 +64,138 @@ export default function Dashboard() {
         Action.list()
       ]);
 
-      // Enrichir les dossiers avec les calculs
-      const enrichedDossiers = dossiersData.map(dossier => {
-        const entreprise = entreprisesData.find(e => e.id === dossier.entreprise_id);
-        
-        // Calculer montant_total_paye
-        const transactionsValides = transactionsData.filter(t => 
-          t.dossier_id === dossier.id &&
-          ["Paiement", "Virement reçu"].includes(t.type_transaction) &&
-          t.pris_en_compte_calcul === true &&
-          t.statut !== "Annulé"
-        );
-        const montantTotalPaye = transactionsValides.reduce((sum, t) => sum + (t.montant || 0), 0);
-        
-        // Calculer montant_restant_du
-        const montantRestant = (dossier.montant_initial || 0) - montantTotalPaye;
-        
-        // Calculer jours de retard
-        const joursRetard = dossier.date_premier_impaye ? 
-          differenceInDays(new Date(), parseISO(dossier.date_premier_impaye)) : 0;
-        
-        // Calculer jours depuis dernière action
-        const actionsEntreprise = actionsData.filter(a => a.entreprise_id === dossier.entreprise_id);
-        const derniereAction = actionsEntreprise.length > 0 ? 
-          actionsEntreprise.reduce((latest, action) => 
-            parseISO(action.date_action) > parseISO(latest.date_action) ? action : latest
-          ) : null;
-        
-        const joursDepuisDerniereAction = derniereAction ? 
-          differenceInDays(new Date(), parseISO(derniereAction.date_action)) : null;
-
-        return {
-          ...dossier,
-          entreprise,
-          montant_total_paye: montantTotalPaye,
-          montant_restant_du: montantRestant,
-          jours_retard: joursRetard,
-          jours_depuis_derniere_action: joursDepuisDerniereAction,
-          derniere_action: derniereAction
-        };
+      setRawData({
+        entreprises: entreprisesData,
+        dossiers: dossiersData,
+        transactions: transactionsData,
+        actions: actionsData
       });
-
-      setEntreprises(entreprisesData);
-      setDossiers(enrichedDossiers);
-      setTransactions(transactionsData);
-      setActions(actionsData);
+      
+      logger.debug("Données du dashboard chargées avec succès", {
+        entreprises: entreprisesData.length,
+        dossiers: dossiersData.length,
+        transactions: transactionsData.length,
+        actions: actionsData.length
+      });
     } catch (error) {
-      console.error("Erreur lors du chargement des données:", error);
+      logger.error("Erreur lors du chargement des données du dashboard", error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  // Filtrer les dossiers selon les critères
-  const getFilteredDossiers = () => {
-    return dossiers.filter(dossier => {
-      // Filtre statuts finaux
-      if (excludeFinal && STATUTS_FINAUX.includes(dossier.statut_recouvrement)) {
-        return false;
-      }
-      
-      // Filtre agent (multi-sélection)
-      if (selectedAgents.length > 0 && !selectedAgents.includes(dossier.entreprise?.agent_assigne)) {
-        return false;
-      }
-      
-      // Filtre pays
-      if (selectedPays !== "all" && dossier.entreprise?.pays !== selectedPays) {
-        return false;
-      }
-      
-      // Nouveau filtre fournisseur (multi-sélection)
-      if (selectedFournisseurs.length > 0 && !selectedFournisseurs.includes(dossier.fournisseur_pret)) {
-        return false;
-      }
-      
-      return true;
-    });
-  };
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
-  const filteredDossiers = getFilteredDossiers();
+  // Enrichissement des dossiers avec memoization
+  const enrichedDossiers = useMemo(() => {
+    if (!rawData.dossiers.length) return [];
+    
+    logger.debug("Enrichissement des dossiers en cours", { count: rawData.dossiers.length });
+    
+    return rawData.dossiers.map(dossier => 
+      enrichDossier(dossier, rawData.entreprises, rawData.transactions, rawData.actions)
+    );
+  }, [rawData]);
 
-  // Calculer la période sélectionnée
-  const getPeriodDates = () => {
-    const now = new Date();
-    switch (selectedPeriod) {
-      case "current_month":
-        return { start: startOfMonth(now), end: endOfMonth(now) };
-      case "last_month":
-        const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        return { start: startOfMonth(lastMonth), end: endOfMonth(lastMonth) };
-      case "last_7_days":
-        return { start: subDays(now, 7), end: now };
-      case "last_30_days":
-        return { start: subDays(now, 30), end: now };
-      default:
-        return { start: startOfMonth(now), end: endOfMonth(now) };
+  // Données filtrées avec memoization
+  const filteredDossiers = useMemo(() => {
+    let filtered = enrichedDossiers;
+
+    // Filtre statuts finaux
+    if (filters.excludeFinal) {
+      filtered = filtered.filter(dossier => !STATUTS_FINAUX.includes(dossier.statut_recouvrement));
     }
-  };
+    
+    // Filtre agent (multi-sélection)
+    if (filters.selectedAgents.length > 0) {
+      filtered = filtered.filter(dossier => 
+        dossier.entreprise && filters.selectedAgents.includes(dossier.entreprise.agent_assigne)
+      );
+    }
+    
+    // Filtre pays
+    if (filters.selectedPays !== "all") {
+      filtered = filtered.filter(dossier => 
+        dossier.entreprise && dossier.entreprise.pays === filters.selectedPays
+      );
+    }
+    
+    // Filtre fournisseur (multi-sélection)
+    if (filters.selectedFournisseurs.length > 0) {
+      filtered = filtered.filter(dossier => 
+        filters.selectedFournisseurs.includes(dossier.fournisseur_pret)
+      );
+    }
 
-  const { start: periodStart, end: periodEnd } = getPeriodDates();
+    logger.debug("Filtrage des dossiers terminé", { 
+      initial: enrichedDossiers.length, 
+      filtered: filtered.length 
+    });
 
-  // KPIs
-  const stats = {
-    dossiersActifs: filteredDossiers.length,
-    montantTotal: filteredDossiers.reduce((sum, d) => sum + (d.montant_restant_du || 0), 0),
-    montantRecouvre: transactions
-      .filter(t => 
-        ["Paiement", "Virement reçu"].includes(t.type_transaction) &&
-        t.pris_en_compte_calcul === true &&
-        t.statut !== "Annulé" &&
-        parseISO(t.date_transaction) >= periodStart &&
-        parseISO(t.date_transaction) <= periodEnd &&
-        // Filtrer les transactions selon les dossiers filtrés
-        filteredDossiers.some(d => d.id === t.dossier_id)
-      )
-      .reduce((sum, t) => sum + (t.montant || 0), 0),
-    entreprisesAReassigner: entreprises.filter(e => 
+    return filtered;
+  }, [enrichedDossiers, filters]);
+
+  // Statistiques du dashboard avec memoization
+  const dashboardStats = useMemo(() => {
+    const stats = calculateDashboardStats(filteredDossiers, rawData.transactions, filters.selectedPeriod);
+    
+    // Ajouter le calcul des entreprises à réassigner
+    const entreprisesAReassigner = rawData.entreprises.filter(e => 
       !e.agent_assigne || !AGENTS_VALIDES.includes(e.agent_assigne)
-    ).length
-  };
+    ).length;
 
-  // Calcul du taux de récupération
-  const montantInitialPeriode = filteredDossiers.reduce((sum, d) => sum + (d.montant_initial || 0), 0);
-  const tauxRecuperation = montantInitialPeriode > 0 ? (stats.montantRecouvre / montantInitialPeriode) * 100 : 0;
+    return { ...stats, entreprisesAReassigner };
+  }, [filteredDossiers, rawData.transactions, rawData.entreprises, filters.selectedPeriod]);
 
-  // Données pour les graphiques
+  // Données pour les graphiques avec memoization
+  const chartData = useMemo(() => {
+    return calculateChartData(filteredDossiers, rawData.transactions, filters.selectedPeriod, AGENTS_VALIDES);
+  }, [filteredDossiers, rawData.transactions, filters.selectedPeriod]);
+
+  // Listes prioritaires avec memoization
+  const priorityLists = useMemo(() => {
+    return calculatePriorityLists(filteredDossiers);
+  }, [filteredDossiers]);
+
+  // Gestionnaires de changement de filtre optimisés avec useCallback
+  const handleFilterChange = useCallback((key, value) => {
+    setFilters(prev => ({
+      ...prev,
+      [key]: value
+    }));
+    logger.debug("Filtre mis à jour", { key, value });
+  }, []);
+
+  const handleExcludeFinalChange = useCallback((checked) => {
+    handleFilterChange('excludeFinal', checked);
+  }, [handleFilterChange]);
+
+  const handleAgentsChange = useCallback((agents) => {
+    handleFilterChange('selectedAgents', agents);
+  }, [handleFilterChange]);
+
+  const handlePaysChange = useCallback((pays) => {
+    handleFilterChange('selectedPays', pays);
+  }, [handleFilterChange]);
+
+  const handlePeriodChange = useCallback((period) => {
+    handleFilterChange('selectedPeriod', period);
+  }, [handleFilterChange]);
+
+  const handleFournisseursChange = useCallback((fournisseurs) => {
+    handleFilterChange('selectedFournisseurs', fournisseurs);
+  }, [handleFilterChange]);
+
+  // Options pour les selects avec memoization
+  const agentOptions = useMemo(() => 
+    AGENTS_VALIDES.map(agent => ({ value: agent, label: agent })), []
+  );
   
-  // 1. Répartition par statut
-  const statutsData = filteredDossiers.reduce((acc, dossier) => {
-    const statut = dossier.statut_recouvrement;
-    acc[statut] = (acc[statut] || 0) + 1;
-    return acc;
-  }, {});
-
-  const pieData = Object.entries(statutsData).map(([statut, count]) => ({
-    name: statut.replace(/_/g, ' '),
-    value: count,
-    montant: filteredDossiers
-      .filter(d => d.statut_recouvrement === statut)
-      .reduce((sum, d) => sum + (d.montant_restant_du || 0), 0)
-  }));
-
-  // 2. Performance par agent
-  const agentPerformance = AGENTS_VALIDES.map(agent => {
-    // La logique ici reste valide même avec multi-sélection, elle calcule la perf pour chaque agent individuellement
-    const dossiersAgent = filteredDossiers.filter(d => d.entreprise?.agent_assigne === agent);
-    const montantRecouvreSurPeriode = transactions
-      .filter(t => 
-        ["Paiement", "Virement reçu"].includes(t.type_transaction) &&
-        t.pris_en_compte_calcul === true &&
-        t.statut !== "Annulé" &&
-        parseISO(t.date_transaction) >= periodStart &&
-        parseISO(t.date_transaction) <= periodEnd &&
-        dossiersAgent.some(d => d.id === t.dossier_id)
-      )
-      .reduce((sum, t) => sum + (t.montant || 0), 0);
-
-    return {
-      agent,
-      dossiers: dossiersAgent.length,
-      montantRecouvre: montantRecouvreSurPeriode,
-      montantTotal: dossiersAgent.reduce((sum, d) => sum + (d.montant_restant_du || 0), 0)
-    };
-  });
-
-  // 3. Ancienneté des créances
-  const ancienneteData = [
-    { tranche: "0-30j", count: 0, montant: 0 },
-    { tranche: "31-60j", count: 0, montant: 0 },
-    { tranche: "61-90j", count: 0, montant: 0 },
-    { tranche: "91-180j", count: 0, montant: 0 },
-    { tranche: "+180j", count: 0, montant: 0 }
-  ];
-
-  filteredDossiers.forEach(dossier => {
-    const jours = dossier.jours_retard || 0;
-    let index;
-    if (jours <= 30) index = 0;
-    else if (jours <= 60) index = 1;
-    else if (jours <= 90) index = 2;
-    else if (jours <= 180) index = 3;
-    else index = 4;
-
-    ancienneteData[index].count++;
-    ancienneteData[index].montant += dossier.montant_restant_du || 0;
-  });
-
-  // 4. Actions du jour à faire (dossiers sans action depuis plus de X jours)
-  const actionsAFaire = filteredDossiers
-    .filter(d => (d.jours_depuis_derniere_action || 0) > 3)
-    .sort((a, b) => (b.jours_depuis_derniere_action || 0) - (a.jours_depuis_derniere_action || 0))
-    .slice(0, 10);
-
-  // 5. Promesses de paiement à surveiller
-  const promessesASurveiller = filteredDossiers
-    .filter(d => d.statut_recouvrement === "PROMISE TO PAY")
-    .slice(0, 10);
-
-  // 6. Top 10 des plus gros dossiers
-  const topDossiers = filteredDossiers
-    .sort((a, b) => (b.montant_restant_du || 0) - (a.montant_restant_du || 0))
-    .slice(0, 10);
-
-  const agentOptions = AGENTS_VALIDES.map(agent => ({ value: agent, label: agent }));
-  const fournisseurOptions = FOURNISSEURS.map(f => ({ value: f, label: f }));
+  const fournisseurOptions = useMemo(() => 
+    FOURNISSEURS.map(f => ({ value: f, label: f })), []
+  );
 
   if (loading) {
     return (
@@ -290,13 +230,13 @@ export default function Dashboard() {
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:flex lg:flex-wrap items-center gap-4">
                   <div className="flex items-center space-x-2 col-span-2 md:col-span-1">
                     <Switch 
-                      checked={excludeFinal}
-                      onCheckedChange={setExcludeFinal}
+                      checked={filters.excludeFinal}
+                      onCheckedChange={handleExcludeFinalChange}
                     />
                     <span className="text-sm">Exclure statuts finaux</span>
                   </div>
                   
-                  <Select value={selectedPeriod} onValueChange={setSelectedPeriod}>
+                  <Select value={filters.selectedPeriod} onValueChange={handlePeriodChange}>
                     <SelectTrigger className="w-full">
                       <SelectValue />
                     </SelectTrigger>
@@ -311,8 +251,8 @@ export default function Dashboard() {
                   {/* Nouveau filtre fournisseur multi-select */}
                   <MultiSelect
                     options={fournisseurOptions}
-                    selected={selectedFournisseurs}
-                    onChange={setSelectedFournisseurs}
+                    selected={filters.selectedFournisseurs}
+                    onChange={handleFournisseursChange}
                     placeholder="Fournisseurs"
                     className="w-full"
                   />
@@ -320,24 +260,24 @@ export default function Dashboard() {
                   {/* Nouveau filtre agent multi-select */}
                   <MultiSelect
                     options={agentOptions}
-                    selected={selectedAgents}
-                    onChange={setSelectedAgents}
+                    selected={filters.selectedAgents}
+                    onChange={handleAgentsChange}
                     placeholder="Agents"
                     className="w-full"
                   />
 
                   <div className="flex gap-2">
                     <Button
-                      variant={selectedPays === "France" ? "default" : "outline"}
+                      variant={filters.selectedPays === "France" ? "default" : "outline"}
                       size="sm"
-                      onClick={() => setSelectedPays(selectedPays === "France" ? "all" : "France")}
+                      onClick={() => handlePaysChange(filters.selectedPays === "France" ? "all" : "France")}
                     >
                       France
                     </Button>
                     <Button
-                      variant={selectedPays === "Allemagne" ? "default" : "outline"}
+                      variant={filters.selectedPays === "Allemagne" ? "default" : "outline"}
                       size="sm"
-                      onClick={() => setSelectedPays(selectedPays === "Allemagne" ? "all" : "Allemagne")}
+                      onClick={() => handlePaysChange(filters.selectedPays === "Allemagne" ? "all" : "Allemagne")}
                     >
                       Allemagne
                     </Button>
@@ -356,9 +296,9 @@ export default function Dashboard() {
               <FolderOpen className="w-5 h-5 text-slate-400" />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold text-slate-900">{stats.dossiersActifs}</div>
+              <div className="text-3xl font-bold text-slate-900">{dashboardStats.dossiersActifs}</div>
               <p className="text-xs text-slate-500 mt-1">
-                {excludeFinal ? 'Statuts finaux exclus' : 'Tous statuts'}
+                {filters.excludeFinal ? 'Statuts finaux exclus' : 'Tous statuts'}
               </p>
             </CardContent>
           </Card>
@@ -370,7 +310,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-slate-900">
-                {new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(stats.montantTotal)}
+                {new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(dashboardStats.montantTotal)}
               </div>
               <p className="text-xs text-slate-500 mt-1">Total des créances actives</p>
             </CardContent>
@@ -383,10 +323,10 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-emerald-600">
-                {new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(stats.montantRecouvre)}
+                {new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(dashboardStats.montantRecouvre)}
               </div>
               <p className="text-xs text-slate-500 mt-1">
-                {selectedPeriod === 'current_month' ? 'Ce mois' : 'Période sélectionnée'}
+                {filters.selectedPeriod === 'current_month' ? 'Ce mois' : 'Période sélectionnée'}
               </p>
             </CardContent>
           </Card>
@@ -397,8 +337,8 @@ export default function Dashboard() {
               <TrendingUp className="w-5 h-5 text-slate-400" />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold text-emerald-600">{tauxRecuperation.toFixed(1)}%</div>
-              <Progress value={tauxRecuperation} className="mt-2 h-2" />
+              <div className="text-3xl font-bold text-emerald-600">{dashboardStats.tauxRecuperation.toFixed(1)}%</div>
+              <Progress value={dashboardStats.tauxRecuperation} className="mt-2 h-2" />
             </CardContent>
           </Card>
         </div>
@@ -412,7 +352,7 @@ export default function Dashboard() {
             <div className="flex items-center gap-8">
               {/* Légende à gauche */}
               <div className="flex-shrink-0 space-y-2">
-                {pieData.map((entry, index) => (
+                {chartData.pieData.map((entry, index) => (
                   <div key={entry.name} className="flex items-center gap-3">
                     <div 
                       className="w-4 h-4 rounded-sm"
@@ -433,14 +373,14 @@ export default function Dashboard() {
                 <ResponsiveContainer width="100%" height={400}>
                   <PieChart>
                     <Pie
-                      data={pieData}
+                      data={chartData.pieData}
                       cx="50%"
                       cy="50%"
                       outerRadius={120}
                       fill="#8884d8"
                       dataKey="value"
                     >
-                      {pieData.map((entry, index) => (
+                      {chartData.pieData.map((entry, index) => (
                         <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                       ))}
                     </Pie>
@@ -464,7 +404,7 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={350}>
-              <BarChart data={agentPerformance} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+              <BarChart data={chartData.agentPerformance} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="agent" />
                 <YAxis />
@@ -488,7 +428,7 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={ancienneteData}>
+              <BarChart data={chartData.ancienneteData}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="tranche" />
                 <YAxis />
@@ -517,7 +457,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                {actionsAFaire.map((dossier) => (
+                {priorityLists.actionsAFaire.map((dossier) => (
                   <div key={dossier.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
                     <div>
                       <p className="font-medium text-slate-900">{dossier.entreprise?.nom_entreprise}</p>
@@ -530,7 +470,7 @@ export default function Dashboard() {
                     </Badge>
                   </div>
                 ))}
-                {actionsAFaire.length === 0 && (
+                {priorityLists.actionsAFaire.length === 0 && (
                   <p className="text-center text-slate-500 py-4">Aucune action prioritaire</p>
                 )}
               </div>
@@ -547,7 +487,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                {topDossiers.slice(0, 5).map((dossier) => (
+                {priorityLists.topDossiers.slice(0, 5).map((dossier) => (
                   <div key={dossier.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
                     <div>
                       <p className="font-medium text-slate-900">{dossier.entreprise?.nom_entreprise}</p>
@@ -569,7 +509,7 @@ export default function Dashboard() {
         </div>
 
         {/* Alert entreprises à réassigner */}
-        {stats.entreprisesAReassigner > 0 && (
+        {dashboardStats.entreprisesAReassigner > 0 && (
           <Card className="mt-8 border-orange-200 bg-orange-50">
             <CardContent className="p-6">
               <div className="flex items-center justify-between">
@@ -577,7 +517,7 @@ export default function Dashboard() {
                   <AlertTriangle className="w-6 h-6 text-orange-600" />
                   <div>
                     <p className="font-medium text-orange-900">
-                      {stats.entreprisesAReassigner} entreprise{stats.entreprisesAReassigner > 1 ? 's' : ''} à réassigner
+                      {dashboardStats.entreprisesAReassigner} entreprise{dashboardStats.entreprisesAReassigner > 1 ? 's' : ''} à réassigner
                     </p>
                     <p className="text-sm text-orange-700">
                       Ces entreprises ont des agents non valides et nécessitent une réassignation

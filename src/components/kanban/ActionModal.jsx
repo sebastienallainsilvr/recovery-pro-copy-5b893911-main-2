@@ -20,6 +20,7 @@ import { fr } from "date-fns/locale";
 import { CalendarIcon, CheckCircle, XCircle, Copy } from "lucide-react";
 import { User } from "@/api/entities";
 import * as templates from './templates';
+import { logger } from '@/components/utils/logger';
 
 const ACTION_TYPES = ["Appel sortant", "Appel entrant", "Email manuel", "SMS", "Courrier", "Visite", "Note interne"];
 const RESULTATS = ["Contact établi", "Promesse de paiement", "Refus de payer", "Contestation", "Demande d'information", "Pas de réponse", "Autre"];
@@ -40,19 +41,19 @@ export default function ActionModal({ isOpen, onClose, dossier, onConfirm, prese
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        console.log("ActionModal: Tentative de récupération de l'utilisateur...");
+        logger.debug("ActionModal: Tentative de récupération de l'utilisateur");
         const user = await User.me();
-        console.log("ActionModal: Utilisateur récupéré:", user);
+        logger.debug("ActionModal: Utilisateur récupéré", { userId: user.id, hasFullName: !!user.full_name });
         
         if (user && user.full_name) {
-          console.log("ActionModal: Nom complet trouvé:", user.full_name);
+          logger.debug("ActionModal: Nom complet trouvé", { fullName: user.full_name });
           setCurrentUserFullName(user.full_name);
         } else {
-          console.log("ActionModal: Pas de nom complet, utilisation de l'email:", user.email);
+          logger.debug("ActionModal: Pas de nom complet, utilisation de l'email", { email: user.email });
           setCurrentUserFullName(user.email || "Agent Inconnu");
         }
       } catch (error) {
-        console.error("ActionModal: Erreur lors de la récupération de l'utilisateur:", error);
+        logger.error("ActionModal: Erreur lors de la récupération de l'utilisateur", error);
         setCurrentUserFullName("Agent Inconnu");
       }
     };
@@ -70,7 +71,7 @@ export default function ActionModal({ isOpen, onClose, dossier, onConfirm, prese
       setEmailTemplate(`Objet : ${templateData.objet}\n\n${templateData.contenu}`);
       setTemplateInfo(templateData);
     } catch (error) {
-      console.error("Erreur lors du chargement du template email:", error);
+      logger.error("Erreur lors du chargement du template email:", error);
       setEmailTemplate("Impossible de charger le template d'email.");
       setTemplateInfo(null);
     }
@@ -83,7 +84,7 @@ export default function ActionModal({ isOpen, onClose, dossier, onConfirm, prese
       const templateData = await templates.getTemplate(dossier.statut_recouvrement, 'SMS', dossier);
       setSmsContent(templateData.contenu);
     } catch (error) {
-      console.error("Erreur lors du chargement du template SMS:", error);
+      logger.error("Erreur lors du chargement du template SMS:", error);
       setSmsContent("Impossible de charger le template SMS.");
     }
   }, [dossier]);
@@ -127,7 +128,7 @@ export default function ActionModal({ isOpen, onClose, dossier, onConfirm, prese
   const handleSubmit = (e) => {
     e.preventDefault();
     
-    console.log("ActionModal: Soumission avec agent responsable:", currentUserFullName);
+    logger.debug("ActionModal: Soumission avec agent responsable", { agent: currentUserFullName });
     
     // Construire la description finale avec préfixe SMS si nécessaire
     let finalDescription = description;
